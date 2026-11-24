@@ -11,13 +11,13 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / 'out'
-VERSION = '0.1.0'
+VERSION = '0.1.1'
 PY = '3.13.13'
 RUNTIME = f'python-{PY}-embed-amd64.zip'
 SHA = '8766a8775746235e23cf5aee5027ab1060bb981d93110577adcf3508aa0cbd55'
 SCRIPTS = ['native_store.py','bridge.py','relay.py','bindings.py']
 TOP = ['README.md','LICENSE','Manage.ps1','Install.cmd','Repair.cmd','Uninstall.cmd']
-SOURCE = TOP + ['.gitignore','build.py','tests/smoke.py'] + ['src/'+x for x in SCRIPTS+['NativeCard.cs','Backend.cs']]
+SOURCE = TOP + ['.gitignore','build.py','tests/smoke.py','tests/test_route_identity.py'] + ['src/'+x for x in SCRIPTS+['NativeCard.cs','Backend.cs']]
 
 
 def digest(path):
