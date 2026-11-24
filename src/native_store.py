@@ -1,4 +1,4 @@
-"""Credential operations for the native desktop card. Transport uses child stdio only."""
+"""Credential operations for the native desktop card. URL/key return through child stdio only."""
 import os
 import json
 import sqlite3
@@ -36,7 +36,8 @@ def action(home, store, req):
             store.save(tid,req.get('url'),req.get('key'))
     elif op!='read': raise InputError('不支持的操作。')
     record=store.get(tid)
-    return {'id':tid,'url':record['url'] if record else ''}
+    return {'id':tid,'url':record['url'] if record else '',
+            'key':record['key'] if record else ''}
 
 
 if __name__=='__main__':

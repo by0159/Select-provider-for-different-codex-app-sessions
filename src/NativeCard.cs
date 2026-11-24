@@ -50,7 +50,7 @@ class Anchor {
     }
 }
 class Choice {public string id{get;set;} public string project{get;set;} public override string ToString(){return project+" · "+id;} }
-class Record {public string id{get;set;} public string url{get;set;} public string error{get;set;} public Choice[] choices{get;set;} }
+class Record {public string id{get;set;} public string url{get;set;} public string key{get;set;} public string error{get;set;} public Choice[] choices{get;set;} }
 class Store {
     public static readonly string Root=AppDomain.CurrentDomain.BaseDirectory;
     public static Record Call(string op,string label,string id,string url,string key){
@@ -73,16 +73,16 @@ class Card : Form {
     protected override CreateParams CreateParams{get{var cp=base.CreateParams;cp.ExStyle|=0x80;return cp;}}
     Button Btn(string s,EventHandler click){var b=new Button{Text=s,FlatStyle=FlatStyle.Flat,TextAlign=ContentAlignment.MiddleCenter,BackColor=paper,ForeColor=ink,UseVisualStyleBackColor=false,Cursor=Cursors.Hand,TabStop=true};b.FlatAppearance.BorderSize=0;b.FlatAppearance.MouseOverBackColor=border;b.Click+=click;Controls.Add(b);return b;}
     Label Lbl(string s){var l=new Label{Text=s,ForeColor=muted,TextAlign=ContentAlignment.MiddleLeft,AutoEllipsis=true};Controls.Add(l);return l;}
-    TextBox Edit(string name,bool mask){var e=new TextBox{AccessibleName=name,UseSystemPasswordChar=mask,BorderStyle=BorderStyle.FixedSingle,BackColor=Color.FromArgb(32,32,32),ForeColor=ink,MaxLength=mask?2200:1200,AutoSize=false};Controls.Add(e);return e;}
+    TextBox Edit(string name,int maxLength){var e=new TextBox{AccessibleName=name,UseSystemPasswordChar=false,BorderStyle=BorderStyle.FixedSingle,BackColor=Color.FromArgb(32,32,32),ForeColor=ink,MaxLength=maxLength,AutoSize=false};Controls.Add(e);return e;}
     public Card(){AutoScaleMode=AutoScaleMode.None;FormBorderStyle=FormBorderStyle.None;ShowInTaskbar=false;StartPosition=FormStartPosition.Manual;Text="会话提供方";BackColor=paper;DoubleBuffered=true;
         heading=Btn("会话提供方",Toggle);heading.TextAlign=ContentAlignment.MiddleLeft;fold=Btn("＋",Toggle);fold.AccessibleName="展开会话提供方";
-        subtitle=Lbl("");urlLabel=Lbl("API 基础地址");url=Edit("API 基础地址",false);keyLabel=Lbl("API Key");key=Edit("API Key",true);feedback=Lbl("");
+        subtitle=Lbl("");urlLabel=Lbl("API 基础地址");url=Edit("API 基础地址",1200);keyLabel=Lbl("API Key");key=Edit("API Key",2200);feedback=Lbl("");
         save=Btn("保存",async(s,e)=>await Write(false));save.BackColor=Color.FromArgb(67,78,68);reset=Btn("恢复默认",async(s,e)=>await Write(true));
         options=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Visible=false,AccessibleName="同名会话"};Controls.Add(options);options.SelectedIndexChanged+=async(s,e)=>{if(!editingChoice&&options.SelectedItem!=null){var choice=(Choice)options.SelectedItem;key.Clear();await LoadRecord(choice.id);}};
         timer.Interval=650;timer.Tick+=async(s,e)=>await Scan();timer.Start();
     }
     int U(int px){return (int)Math.Round(px*dpi/96.0);} void Place(Control c,int x,int y,int width,int height){c.SetBounds(U(x),U(y),U(width),U(height));}
-    void Toggle(object s,EventArgs e){expanded=!expanded;if(!expanded)key.Clear();Arrange();}
+    void Toggle(object s,EventArgs e){expanded=!expanded;Arrange();}
     void NewContext(string title){generation++;label=title;thread="";saved="";key.Clear();url.Clear();options.Visible=false;options.Items.Clear();ready=false;working=false;feedback.Text="";subtitle.Text="读取中…";}
     bool Supported(IntPtr h){if(h==IntPtr.Zero)return false;int pid;Win.GetWindowThreadProcessId(h,out pid);try{using(var p=Process.GetProcessById(pid)){return (p.ProcessName.Equals("ChatGPT",StringComparison.OrdinalIgnoreCase)||p.ProcessName.Equals("Codex",StringComparison.OrdinalIgnoreCase))&&p.MainModule.FileName.IndexOf(@"\WindowsApps\OpenAI.Codex_",StringComparison.OrdinalIgnoreCase)>=0;}}catch{return false;}}
     IntPtr FindHost(IntPtr foreground){
@@ -119,14 +119,14 @@ class Card : Form {
         var r=await Task.Run(()=>Store.Call("read",title,pick,null,null));if(g!=generation)return;
         if(r.choices!=null){editingChoice=true;options.Items.Clear();options.Items.AddRange(r.choices);options.SelectedIndex=-1;editingChoice=false;subtitle.Text="请选择同名会话";feedback.Text="请核对会话 ID 后再保存。";ready=false;}
         else if(r.error!=null){subtitle.Text="等待会话";feedback.Text=r.error;ready=false;}
-        else{thread=r.id;saved=r.url??"";url.Text=saved;key.Clear();ready=true;Status();}
+        else{thread=r.id;saved=r.url??"";url.Text=saved;key.Text=r.key??"";ready=true;Status();}
     }catch{if(g==generation){ready=false;feedback.Text="无法读取会话设置。";}}finally{if(g==generation){working=false;Arrange();}}}
     void Status(){subtitle.Text=saved.Length==0?"跟随 config.toml":new Uri(saved).Host;}
     async Task Write(bool clear){if(!ready||working||anchor==null)return;working=true;save.Enabled=reset.Enabled=false;int g=generation;string t=thread,l=label,u=url.Text.Trim(),k=key.Text.Trim();try{
         var fresh=await Task.Run(()=>global::Anchor.Read(owner));if(fresh==null||fresh.Label!=l||g!=generation){key.Clear();feedback.Text="会话已切换，请重新打开卡片。";return;}
         if(!clear&&(u.Length==0)!=(k.Length==0)){feedback.Text="请同时填写 URL 和 Key，或恢复默认。";return;}
         var r=await Task.Run(()=>Store.Call(clear?"clear":"save",l,t,u,k));if(g!=generation)return;if(r.error!=null){feedback.Text=r.error;return;}
-        saved=r.url??"";url.Text=saved;key.Clear();Status();feedback.Text=clear||saved.Length==0?"已恢复使用 config.toml。":"已保存到本会话。";
+        saved=r.url??"";url.Text=saved;key.Text=r.key??"";Status();feedback.Text=clear||saved.Length==0?"已恢复使用 config.toml。":"已保存到本会话。";
     }catch{feedback.Text="保存失败，请重试。";}finally{if(g==generation){working=false;Arrange();}}}
     int fontDpi;Font cardFont,titleFont;
     void Arrange(){canPlace=false;if(anchor==null)return;if(fontDpi!=dpi){var prev=cardFont;var pt=titleFont;cardFont=new Font("Microsoft YaHei UI",U(13),FontStyle.Regular,GraphicsUnit.Pixel);titleFont=new Font("Microsoft YaHei UI",U(14),FontStyle.Bold,GraphicsUnit.Pixel);Font=cardFont;heading.Font=titleFont;fontDpi=dpi;if(prev!=null)prev.Dispose();if(pt!=null)pt.Dispose();}
