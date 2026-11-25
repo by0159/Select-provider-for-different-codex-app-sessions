@@ -7,10 +7,13 @@ import os
 import re
 import secrets
 import socket
+import sqlite3
 import threading
+import time
 import tomllib
 from urllib.parse import urlsplit
 from bindings import Bindings, address, route_id
+from speed import BODY_LIMIT, SpeedPayloadError, SpeedStore, prepare, shared_tier
 
 AUTH = 'X-Thread-Provider-Card'
 SAFE = {'content-type', 'accept', 'user-agent', 'openai-beta'}
@@ -32,7 +35,7 @@ def configuration(home):
     url = address(provider.get('base_url'))
     hdr = dict(provider.get('http_headers') or {})
     hdr.update({k: os.environ[v] for k,v in (provider.get('env_http_headers') or {}).items() if v in os.environ})
-    return name, url, key, {k:v for k,v in hdr.items() if k.lower() not in RESERVED}
+    return name, url, key, {k:v for k,v in hdr.items() if k.lower() not in RESERVED}, shared_tier(cfg)
 
 
 def origin(url):
@@ -48,6 +51,7 @@ class Relay(http.server.ThreadingHTTPServer):
         self.home = home
         self.provider = configuration(home)[0]
         self.bindings = bindings or Bindings()
+        self.speed = SpeedStore(home)
         self.secret = secrets.token_hex(32)
         super().__init__(('127.0.0.1', 0), Handler)
 
@@ -86,7 +90,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         connection = None
         started = False
         try:
-            name, url, key, configured = configuration(self.server.home)
+            name, url, key, configured, configured_tier = configuration(self.server.home)
             if name != self.server.provider:
                 return self.fail(409, 'Default provider changed. Restart Codex to reload.')
             tid = route_id(self.headers)
@@ -102,9 +106,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if host in ('127.0.0.1', 'localhost', '::1') and port == self.server.server_port:
                 return self.fail(400, 'Provider URL points back at the relay.')
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 <= size <= 256 * 1024 * 1024:
+            if not 0 <= size <= BODY_LIMIT:
                 return self.fail(413, 'Request body is too large.')
             body = self.rfile.read(size) if self.command=='POST' else None
+            generation = self.command == 'POST' and self.path == '/v1/responses'
+            if generation:
+                try:
+                    mode = self.server.speed.mode(tid)
+                except (sqlite3.Error, OSError):
+                    # An unreadable optional store must not stop a running chat.
+                    mode = 'inherit'
+                body, sent_tier = prepare(body, self.headers.get('Content-Encoding'),
+                                          configured_tier if mode == 'inherit' else mode)
             headers = {k:v for k,v in self.headers.items() if k.lower() in SAFE | META | {'content-encoding'}}
             headers.update(configured)
             headers.update(Authorization='Bearer '+key, **{'Accept-Encoding':'identity'})
@@ -112,8 +125,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             connection = factory(host, port, timeout=30)
             connection.connect()
             connection.sock.settimeout(None)  # Codex owns the configured stream idle deadline.
+            if generation: sent = time.time_ns()
             connection.request(self.command, urlsplit(url).path.rstrip('/') + self.path[3:], body=body, headers=headers)
             upstream = connection.getresponse()
+            if generation: self.server.speed.record(tid, sent, sent_tier, upstream.status)
             if 300 <= upstream.status < 400:
                 return self.fail(502, 'Use the final API URL. Upstream redirects are disabled.')
             started = True
@@ -125,6 +140,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             while chunk := upstream.read1(65536):
                 self.wfile.write(chunk)
                 self.wfile.flush()
+        except SpeedPayloadError as exc:
+            if not started: self.fail(exc.status, str(exc))
         except (OSError, TypeError, ValueError, KeyError, http.client.HTTPException):
             if not started: self.fail(502, 'Could not read the provider configuration or reach its endpoint.')
         finally:

@@ -51,21 +51,31 @@ class Anchor {
 }
 class Choice {public string id{get;set;} public string project{get;set;} public override string ToString(){return project+" · "+id;} }
 class Record {public string id{get;set;} public string url{get;set;} public string key{get;set;} public string error{get;set;} public Choice[] choices{get;set;} }
+class SpeedRecord {public string mode{get;set;} public string effectiveTier{get;set;} public string lastTier{get;set;} public int? lastStatus{get;set;} public string error{get;set;} }
 class Store {
     public static readonly string Root=AppDomain.CurrentDomain.BaseDirectory;
     public static Record Call(string op,string label,string id,string url,string key){
+        return Exchange<Record>(new {op,label,id,url,key});
+    }
+    public static SpeedRecord Speed(string op,string label,string id,string mode=null){
+        return Exchange<SpeedRecord>(new {op,label,id,mode});
+    }
+    static T Exchange<T>(object request){
         var serializer=new JavaScriptSerializer();var info=new ProcessStartInfo(Path.Combine(Root,@"runtime\python.exe"),"-I -B \""+Path.Combine(Root,"native_store.py")+"\"");
         info.CreateNoWindow=true;info.UseShellExecute=false;info.RedirectStandardInput=true;info.RedirectStandardOutput=true;
         using(var p=Process.Start(info)){
-            var raw=Encoding.UTF8.GetBytes(serializer.Serialize(new {op=op,label=label,id=id,url=url,key=key}));
+            var raw=Encoding.UTF8.GetBytes(serializer.Serialize(request));var reply=p.StandardOutput.ReadToEndAsync();
             p.StandardInput.BaseStream.Write(raw,0,raw.Length);p.StandardInput.BaseStream.Close();
-            if(!p.WaitForExit(4500)){p.Kill();throw new IOException();}return serializer.Deserialize<Record>(p.StandardOutput.ReadToEnd());
+            if(!p.WaitForExit(4500)){p.Kill();throw new IOException();}return serializer.Deserialize<T>(reply.GetAwaiter().GetResult());
         }
     }
 }
 class Card : Form {
     readonly Color paper=Color.FromArgb(44,44,44), ink=Color.FromArgb(239,239,238), muted=Color.FromArgb(185,185,183), border=Color.FromArgb(63,63,63);
-    Button heading,fold,save,reset; Label subtitle,feedback,urlLabel,keyLabel; TextBox url,key; ComboBox options;
+    Button heading,fold,save,reset,speed; Label subtitle,feedback,urlLabel,keyLabel,speedStatus; TextBox url,key; ComboBox options;
+    readonly ContextMenuStrip speedMenu=new ContextMenuStrip(); readonly ToolTip speedTip=new ToolTip();
+    readonly ToolStripMenuItem inherit=new ToolStripMenuItem("跟随 config.toml"),fast=new ToolStripMenuItem("Fast（优先）"),standard=new ToolStripMenuItem("标准");
+    bool savingSpeed,speedReady;DateTime lastSpeedRead=DateTime.MinValue;
     readonly System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer();
     bool sampling,expanded,editingChoice,working,ready,canPlace; int dpi=96, generation; DateTime lastMatch=DateTime.MinValue;
     DateTime? noHostSince; Anchor anchor;string label="",thread="",saved="";IntPtr owner;
@@ -76,14 +86,21 @@ class Card : Form {
     TextBox Edit(string name,int maxLength){var e=new TextBox{AccessibleName=name,UseSystemPasswordChar=false,BorderStyle=BorderStyle.FixedSingle,BackColor=Color.FromArgb(32,32,32),ForeColor=ink,MaxLength=maxLength,AutoSize=false};Controls.Add(e);return e;}
     public Card(){AutoScaleMode=AutoScaleMode.None;FormBorderStyle=FormBorderStyle.None;ShowInTaskbar=false;StartPosition=FormStartPosition.Manual;Text="会话提供方";BackColor=paper;DoubleBuffered=true;
         heading=Btn("会话提供方",Toggle);heading.TextAlign=ContentAlignment.MiddleLeft;fold=Btn("＋",Toggle);fold.AccessibleName="展开会话提供方";
+        speed=Btn("\u26a1",(s,e)=>{if(ready&&speedReady&&!savingSpeed)speedMenu.Show(speed,new Point(0,speed.Height));});
+        speed.AccessibleName="速度选择";speed.Enabled=false;speedTip.SetToolTip(speed,"选择此会话的请求速度");
+        speedStatus=Lbl("");speedMenu.BackColor=paper;speedMenu.ForeColor=ink;
+        speedMenu.Items.AddRange(new ToolStripItem[]{inherit,fast,standard});
+        inherit.Click+=async(s,e)=>await ChangeSpeed("inherit");fast.Click+=async(s,e)=>await ChangeSpeed("priority");standard.Click+=async(s,e)=>await ChangeSpeed("default");
         subtitle=Lbl("");urlLabel=Lbl("API 基础地址");url=Edit("API 基础地址",1200);keyLabel=Lbl("API Key");key=Edit("API Key",2200);feedback=Lbl("");
         save=Btn("保存",async(s,e)=>await Write(false));save.BackColor=Color.FromArgb(67,78,68);reset=Btn("恢复默认",async(s,e)=>await Write(true));
-        options=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Visible=false,AccessibleName="同名会话"};Controls.Add(options);options.SelectedIndexChanged+=async(s,e)=>{if(!editingChoice&&options.SelectedItem!=null){var choice=(Choice)options.SelectedItem;key.Clear();await LoadRecord(choice.id);}};
+        options=new ComboBox{DropDownStyle=ComboBoxStyle.DropDownList,Visible=false,AccessibleName="同名会话"};Controls.Add(options);options.SelectedIndexChanged+=async(s,e)=>{if(!editingChoice&&options.SelectedItem!=null){var choice=(Choice)options.SelectedItem;ResetSelection();await LoadRecord(choice.id);}};
         timer.Interval=650;timer.Tick+=async(s,e)=>await Scan();timer.Start();
     }
     int U(int px){return (int)Math.Round(px*dpi/96.0);} void Place(Control c,int x,int y,int width,int height){c.SetBounds(U(x),U(y),U(width),U(height));}
     void Toggle(object s,EventArgs e){expanded=!expanded;Arrange();}
-    void NewContext(string title){generation++;label=title;thread="";saved="";key.Clear();url.Clear();options.Visible=false;options.Items.Clear();ready=false;working=false;feedback.Text="";subtitle.Text="读取中…";}
+    void ResetSelection(){generation++;thread="";saved="";key.Clear();url.Clear();ready=false;working=false;feedback.Text="";subtitle.Text="读取中…";
+        savingSpeed=speedReady=false;lastSpeedRead=DateTime.MinValue;speedMenu.Close();speed.Enabled=false;speed.Text="\u26a1";speed.AccessibleName="速度选择";speedStatus.Text="";inherit.Checked=fast.Checked=standard.Checked=false;}
+    void NewContext(string title){ResetSelection();label=title;options.Visible=false;options.Items.Clear();}
     bool Supported(IntPtr h){if(h==IntPtr.Zero)return false;int pid;Win.GetWindowThreadProcessId(h,out pid);try{using(var p=Process.GetProcessById(pid)){return (p.ProcessName.Equals("ChatGPT",StringComparison.OrdinalIgnoreCase)||p.ProcessName.Equals("Codex",StringComparison.OrdinalIgnoreCase))&&p.MainModule.FileName.IndexOf(@"\WindowsApps\OpenAI.Codex_",StringComparison.OrdinalIgnoreCase)>=0;}}catch{return false;}}
     IntPtr FindHost(IntPtr foreground){
         if(Supported(foreground))return foreground;
@@ -113,13 +130,14 @@ class Card : Form {
         Win.SetOwner(Handle,-8,owner);
         if(change){NewContext(a.Label);lastMatch=DateTime.UtcNow;await LoadRecord(null);}
         else if(!ready&&options.Items.Count==0&&!working&&(DateTime.UtcNow-lastMatch).TotalSeconds>6){lastMatch=DateTime.UtcNow;await LoadRecord(null);}
+        if(ready&&!savingSpeed&&!speedMenu.Visible&&(expanded||!speedReady)&&(DateTime.UtcNow-lastSpeedRead).TotalSeconds>3)await ReadSpeed();
         Arrange();DisplayCard();
     }catch{if(Visible)Hide();}finally{sampling=false;}}
     async Task LoadRecord(string pick){int g=generation;string title=label;working=true;try{
         var r=await Task.Run(()=>Store.Call("read",title,pick,null,null));if(g!=generation)return;
         if(r.choices!=null){editingChoice=true;options.Items.Clear();options.Items.AddRange(r.choices);options.SelectedIndex=-1;editingChoice=false;subtitle.Text="请选择同名会话";feedback.Text="请核对会话 ID 后再保存。";ready=false;}
         else if(r.error!=null){subtitle.Text="等待会话";feedback.Text=r.error;ready=false;}
-        else{thread=r.id;saved=r.url??"";url.Text=saved;key.Text=r.key??"";ready=true;Status();}
+        else{thread=r.id;saved=r.url??"";url.Text=saved;key.Text=r.key??"";ready=true;Status();await ReadSpeed();}
     }catch{if(g==generation){ready=false;feedback.Text="无法读取会话设置。";}}finally{if(g==generation){working=false;Arrange();}}}
     void Status(){subtitle.Text=saved.Length==0?"跟随 config.toml":new Uri(saved).Host;}
     async Task Write(bool clear){if(!ready||working||anchor==null)return;working=true;save.Enabled=reset.Enabled=false;int g=generation;string t=thread,l=label,u=url.Text.Trim(),k=key.Text.Trim();try{
@@ -128,17 +146,41 @@ class Card : Form {
         var r=await Task.Run(()=>Store.Call(clear?"clear":"save",l,t,u,k));if(g!=generation)return;if(r.error!=null){feedback.Text=r.error;return;}
         saved=r.url??"";url.Text=saved;key.Text=r.key??"";Status();feedback.Text=clear||saved.Length==0?"已恢复使用 config.toml。":"已保存到本会话。";
     }catch{feedback.Text="保存失败，请重试。";}finally{if(g==generation){working=false;Arrange();}}}
+    static string TierLabel(string tier){return tier=="priority"?"Fast":tier=="default"?"标准":tier??"由客户端决定";}
+    void ShowSpeed(SpeedRecord r){
+        if(r==null||r.error!=null||r.mode==null){speedReady=false;speed.Enabled=false;speedStatus.Text=r!=null&&r.error!=null?r.error:"速度设置暂时不可读。";return;}
+        speedReady=true;string name=TierLabel(r.effectiveTier);speed.Text="\u26a1 "+(r.effectiveTier==null?"跟随":name);
+        inherit.Checked=r.mode=="inherit";fast.Checked=r.mode=="priority";standard.Checked=r.mode=="default";
+        string chosen=inherit.Checked?"跟随配置："+name:"本会话："+name;
+        speed.AccessibleName="速度选择，"+chosen;speedTip.SetToolTip(speed,speed.AccessibleName);
+        string last=r.lastStatus.HasValue?"上次请求："+(r.lastTier==null?"未指定档位":TierLabel(r.lastTier))+" · HTTP "+r.lastStatus:"尚无请求记录";
+        speedStatus.Text=chosen+"\n"+last;speed.Enabled=ready&&!savingSpeed;
+    }
+    async Task ReadSpeed(){
+        if(!ready||savingSpeed)return;int g=generation;string l=label,t=thread;lastSpeedRead=DateTime.UtcNow;
+        var version=speedVersion;
+        try{var r=await Task.Run(()=>Store.Speed("speed_read",l,t));if(g==generation&&version==speedVersion)ShowSpeed(r);}
+        catch{if(g==generation&&version==speedVersion)ShowSpeed(null);}
+    }
+    int speedVersion;
+    async Task ChangeSpeed(string mode){
+        if(!ready||!speedReady||savingSpeed)return;int g=generation;string l=label,t=thread;speedVersion++;savingSpeed=true;speed.Enabled=false;
+        try{var fresh=await Task.Run(()=>global::Anchor.Read(owner));if(g!=generation||fresh==null||fresh.Label!=l)return;
+            var r=await Task.Run(()=>Store.Speed("speed_save",l,t,mode));if(g==generation)ShowSpeed(r);
+        }catch{if(g==generation)ShowSpeed(null);}
+        finally{if(g==generation){savingSpeed=false;lastSpeedRead=DateTime.UtcNow;speed.Enabled=ready&&speedReady;}}
+    }
     int fontDpi;Font cardFont,titleFont;
     void Arrange(){canPlace=false;if(anchor==null)return;if(fontDpi!=dpi){var prev=cardFont;var pt=titleFont;cardFont=new Font("Microsoft YaHei UI",U(13),FontStyle.Regular,GraphicsUnit.Pixel);titleFont=new Font("Microsoft YaHei UI",U(14),FontStyle.Bold,GraphicsUnit.Pixel);Font=cardFont;heading.Font=titleFont;fontDpi=dpi;if(prev!=null)prev.Dispose();if(pt!=null)pt.Dispose();}
         int width=anchor.Card.Width,w=(int)Math.Round(width*96.0/dpi),y=anchor.Card.Bottom+U(9);int shift=options.Items.Count>0?32:0;
-        int height=expanded?U(225+shift):U(48);
+        int height=expanded?U(287+shift):U(48);
         if(y+height>anchor.Root.Bottom-U(5)){if(expanded && anchor.Card.Top-anchor.Root.Top>height+U(10))y=anchor.Card.Top-height-U(8);else if(y+height>anchor.Root.Bottom){if(Visible)Hide();return;}}
         canPlace=true;var rect=new Rectangle(anchor.Card.Left,y,width,height);if(Bounds!=rect){Bounds=rect;var path=new GraphicsPath();int r=U(16)*2;path.AddArc(0,0,r,r,180,90);path.AddArc(width-r,0,r,r,270,90);path.AddArc(width-r,height-r,r,r,0,90);path.AddArc(0,height-r,r,r,90,90);path.CloseFigure();var previous=Region;Region=new Region(path);path.Dispose();if(previous!=null)previous.Dispose();}
-        Place(heading,13,5,Math.Min(w/2,118),38);Place(fold,w-40,7,28,32);Place(subtitle,Math.Min(w/2+10,135),8,Math.Max(10,w-Math.Min(w/2+10,135)-48),31);
+        int speedWidth=Math.Min(82,Math.Max(30,w/3));Place(heading,8,5,Math.Max(1,w-speedWidth-48),38);Place(speed,w-speedWidth-38,7,speedWidth,32);Place(fold,w-35,7,28,32);Place(subtitle,16,43,w-32,20);
         fold.Text=expanded?"−":"＋";fold.AccessibleName=expanded?"收起会话提供方":"展开会话提供方";
-        foreach(Control c in new Control[]{urlLabel,url,keyLabel,key,save,reset,feedback})c.Visible=expanded;options.Visible=expanded&&shift>0;
-        Place(options,15,45,w-30,26);Place(urlLabel,16,44+shift,w-32,21);Place(url,16,67+shift,w-32,26);Place(keyLabel,16,98+shift,w-32,21);Place(key,16,121+shift,w-32,26);
-        Place(save,16,159+shift,68,32);Place(reset,91,159+shift,90,32);Place(feedback,16,197+shift,w-32,20);save.Enabled=reset.Enabled=ready&&!working;url.Enabled=key.Enabled=ready&&!working;
+        foreach(Control c in new Control[]{subtitle,urlLabel,url,keyLabel,key,save,reset,feedback,speedStatus})c.Visible=expanded;options.Visible=expanded&&shift>0;
+        Place(options,15,68,w-30,26);Place(urlLabel,16,68+shift,w-32,21);Place(url,16,91+shift,w-32,26);Place(keyLabel,16,122+shift,w-32,21);Place(key,16,145+shift,w-32,26);
+        Place(save,16,183+shift,68,32);Place(reset,91,183+shift,90,32);Place(feedback,16,221+shift,w-32,20);Place(speedStatus,16,243+shift,w-32,38);save.Enabled=reset.Enabled=ready&&!working;url.Enabled=key.Enabled=ready&&!working;
     }
 }
 class Program {

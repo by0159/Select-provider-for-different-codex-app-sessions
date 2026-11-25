@@ -23,7 +23,7 @@ class Upstream(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        self.server.visits.append((self.headers['Thread-Id'], self.headers['Authorization'], self.headers.get('X-Account-Fixture'), body['model'], self.headers.get('X-Thread-Provider-Card')))
+        self.server.visits.append((self.headers['Thread-Id'], self.headers['Authorization'], self.headers.get('X-Account-Fixture'), body['model'], self.headers.get('X-Thread-Provider-Card'), body.get('service_tier')))
         result = dict(id='resp_'+uuid.uuid4().hex, object='response', status='in_progress', created_at=int(time.time()),model=body['model'],output=[])
         item = dict(id='msg_'+uuid.uuid4().hex,type='message',role='assistant',status='completed',content=[dict(type='output_text',text='fixture OK',annotations=[])])
         events = [dict(type='response.created',response=result), dict(type='response.output_item.done',output_index=0,item=item), dict(type='response.completed',response={**result,'status':'completed','output':[item],'usage':dict(input_tokens=10,output_tokens=2,total_tokens=12)})]
@@ -70,6 +70,7 @@ def run():
             server=ThreadingHTTPServer(('127.0.0.1',0),Upstream); server.visits=[]; threading.Thread(target=server.serve_forever,daemon=True).start();stack.callback(server.server_close);stack.callback(server.shutdown);return server
         first,second=serve(),serve(); model='gpt-6-astra'; cfg=f'''model_provider="fixture"
 model="{model}"
+service_tier="fast"
 approval_policy="never"
 sandbox_mode="read-only"
 [model_providers.fixture]
@@ -106,6 +107,8 @@ X-Account-Fixture="default-origin"
             obj=dict(op=op,id=a,label='Panel smoke fixture A',url=f'http://127.0.0.1:{second.server_port}/v1',key='other-fixture')
             data=native_store(obj)
             assert data.get('id')==a and data.get('key')==expected_key, 'Unexpected native store result'
+        def speed(op, tid=a, mode=None):
+            return native_store(dict(op=op,id=tid,label='Panel smoke fixture '+('A' if tid==a else 'B'),mode=mode))
         try:
             store('save','other-fixture')
             store('read','other-fixture')
@@ -113,15 +116,26 @@ X-Account-Fixture="default-origin"
             assert other.get('id')==b and other.get('key')=='' and other.get('url')==''
             wrong=native_store(dict(op='read',id=a,label='Panel smoke fixture B'))
             assert wrong.get('error') and 'key' not in wrong
+            wrong=native_store(dict(op='speed_save',id=a,label='Panel smoke fixture B',mode='default'))
+            assert wrong.get('error') and speed('speed_read')['mode']=='inherit'
+            assert speed('speed_save',mode='default')['mode']=='default'
+            assert speed('speed_read',b)['mode']=='inherit'
             store('read','other-fixture')
             client.ask(a); client.ask(b)
+            receipt=speed('speed_read');assert (receipt['lastTier'],receipt['lastStatus'])==('default',200)
+            assert 'key' not in receipt and 'url' not in receipt
+            assert speed('speed_save',mode='priority')['mode']=='priority'
+            client.ask(a)
         finally: store('clear','')
         store('read','')
+        assert speed('speed_read')['mode']=='priority'  # Clearing a provider preserves its separate speed choice.
+        assert speed('speed_save',mode='inherit')['mode']=='inherit'
+        updated=cfg.replace('service_tier="fast"','service_tier="default"');config.write_text(updated,encoding='utf8')
         client.ask(a);stack.close()
-        assert first.visits==[(t,'Bearer default-fixture','default-origin',model,None) for t in (a,b,b,a)],first.visits
-        assert second.visits==[(a,'Bearer other-fixture',None,model,None)],second.visits
-        assert config.read_bytes().decode('utf8').splitlines()==cfg.splitlines()
+        assert first.visits==[(t,'Bearer default-fixture','default-origin',model,None,tier) for t,tier in ((a,'priority'),(b,'priority'),(b,'priority'),(a,'default'))],first.visits
+        assert second.visits==[(a,'Bearer other-fixture',None,model,None,tier) for tier in ('default','priority')],second.visits
+        assert config.read_bytes().decode('utf8').splitlines()==updated.splitlines()
         manage('Uninstall');assert not dest.exists()
-        print('PASS: version-matched package, install, repair, launcher conflict, native plaintext key editor, save/readback/isolation/clear, five app-server requests and uninstall.')
+        print('PASS: packaged install/repair/uninstall, native card, isolated credentials and six real app-server requests with live speed changes.')
 
 if __name__=='__main__':run()

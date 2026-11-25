@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from bindings import Bindings, InputError, thread_id
+from speed import SpeedStore
 
 
 def action(home, store, req):
@@ -28,6 +29,13 @@ def action(home, store, req):
     if not any(r[0]==tid for r in rows):
         raise InputError('会话已改变，请重新打开卡片。')
     op = req.get('op')
+    if op in ('speed_read', 'speed_save'):
+        if req.get('id') != tid:
+            raise InputError('请先选定会话。')
+        speed = SpeedStore(home)
+        if op == 'speed_save':
+            speed.choose(tid, req.get('mode'))
+        return speed.snapshot(tid)
     if op in ('save','clear'):
         if req.get('id') != tid: raise InputError('请先选定会话。')
         if op=='clear' or (not req.get('url') and not req.get('key')):
